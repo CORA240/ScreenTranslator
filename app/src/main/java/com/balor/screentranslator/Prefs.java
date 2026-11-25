@@ -31,6 +31,10 @@ public final class Prefs {
         return c.getSharedPreferences(FILE, Context.MODE_PRIVATE);
     }
 
+    /** Si la burbuja flotante se muestra (se puede ocultar sin desactivar el servicio). */
+    public static boolean bubbleEnabled(Context c) { return sp(c).getBoolean("bubble_enabled", true); }
+    public static void setBubbleEnabled(Context c, boolean v) { sp(c).edit().putBoolean("bubble_enabled", v).apply(); }
+
     public static String targetLang(Context c) { return sp(c).getString("target_lang", "es"); }
     public static void setTargetLang(Context c, String v) { sp(c).edit().putString("target_lang", v).apply(); }
 

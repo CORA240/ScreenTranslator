@@ -22,6 +22,14 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      # Misma llave de firma en cada compilación, para poder actualizar sin desinstalar.
+      # Se guarda en la caché privada de Actions (no se publica con el código).
+      - name: Llave de firma persistente
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: signing-keystore-v1
+
       - name: Compilar
         run: gradle assembleRelease --no-daemon
 
@@ -40,8 +48,8 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.1.${{ github.run_number }}
-          name: Screen Translator v2.1.${{ github.run_number }}
+          tag_name: v2.2.${{ github.run_number }}
+          name: Screen Translator v2.2.${{ github.run_number }}
           make_latest: true
           files: ScreenTranslator-*.apk
           body: |

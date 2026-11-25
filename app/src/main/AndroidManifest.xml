@@ -30,5 +30,19 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_config" />
         </service>
+        <!-- Botón en el panel rápido (donde están WiFi y Bluetooth) para mostrar/ocultar la burbuja -->
+        <service
+            android:name=".BubbleTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="Traductor"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="true" />
+        </service>
     </application>
 </manifest>

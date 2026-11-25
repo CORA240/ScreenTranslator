@@ -97,7 +97,27 @@ public class TranslatorService extends AccessibilityService {
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         translator = new TextTranslator(this);
-        showBubble();
+        if (Prefs.bubbleEnabled(this)) showBubble();
+        BubbleTileService.refresh(this);
+    }
+
+    /** Muestra u oculta la burbuja según el ajuste (lo llaman el botón del panel rápido y la app). */
+    public static void applyBubblePref(android.content.Context ctx) {
+        TranslatorService s = instance;
+        if (s != null) s.main.post(s::updateBubbleVisibility);
+        BubbleTileService.refresh(ctx);
+    }
+
+    private void updateBubbleVisibility() {
+        boolean want = Prefs.bubbleEnabled(this);
+        if (want && bubble == null) {
+            showBubble();
+        } else if (!want && bubble != null) {
+            stopLive();
+            dismissMenu();
+            try { wm.removeView(bubble); } catch (Exception ignored) {}
+            bubble = null;
+        }
     }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {}
@@ -106,6 +126,7 @@ public class TranslatorService extends AccessibilityService {
     @Override
     public void onDestroy() {
         stopLive();
+        dismissMenu();
         if (bubble != null) {
             try { wm.removeView(bubble); } catch (Exception ignored) {}
             bubble = null;
@@ -115,6 +136,7 @@ public class TranslatorService extends AccessibilityService {
         if (recognizer != null) recognizer.close();
         if (translator != null) translator.close();
         instance = null;
+        BubbleTileService.refresh(this);
         super.onDestroy();
     }
 
@@ -155,6 +177,7 @@ public class TranslatorService extends AccessibilityService {
     }
 
     private void paintBubble() {
+        if (bubble == null) return;
         GradientDrawable bg = new GradientDrawable();
         bg.setShape(GradientDrawable.OVAL);
         bg.setColor(live ? 0xE62E7D32 : 0xE61565C0); // verde = en vivo, azul = apagado
@@ -175,7 +198,7 @@ public class TranslatorService extends AccessibilityService {
         private boolean moved, longFired;
         private final Runnable longPress = () -> {
             longFired = true;
-            openSettings();
+            showMenu();
         };
 
         @Override
@@ -214,6 +237,70 @@ public class TranslatorService extends AccessibilityService {
                     return true;
             }
             return false;
+        }
+    }
+
+    // ---- menú al mantener presionada la burbuja
+    private android.widget.LinearLayout menu;
+
+    private void showMenu() {
+        dismissMenu();
+        menu = new android.widget.LinearLayout(this);
+        menu.setOrientation(android.widget.LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xF2FFFFFF);
+        bg.setCornerRadius(dp(12));
+        bg.setStroke(dp(1), 0xFFBDBDBD);
+        menu.setBackground(bg);
+        menu.setElevation(dp(8));
+        menu.setPadding(dp(4), dp(4), dp(4), dp(4));
+        menu.addView(menuItem(live ? "■  Detener traducción" : "▶  Traducir", () -> {
+            if (live) stopLive(); else startLive();
+        }));
+        menu.addView(menuItem("⚙  Ajustes", this::openSettings));
+        menu.addView(menuItem("✕  Ocultar burbuja", () -> {
+            Prefs.setBubbleEnabled(this, false);
+            updateBubbleVisibility();
+            BubbleTileService.refresh(this);
+            Toast.makeText(this, "Burbuja oculta. Actívela desde el panel rápido o la app.",
+                    Toast.LENGTH_LONG).show();
+        }));
+
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                PixelFormat.TRANSLUCENT);
+        lp.gravity = Gravity.TOP | Gravity.START;
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        boolean rightSide = bubbleLp.x > dm.widthPixels / 2;
+        lp.x = rightSide ? Math.max(0, bubbleLp.x - dp(200)) : bubbleLp.x + bubbleLp.width + dp(4);
+        lp.y = bubbleLp.y;
+        menu.setOnTouchListener((v, e) -> {
+            if (e.getActionMasked() == MotionEvent.ACTION_OUTSIDE) dismissMenu();
+            return false;
+        });
+        wm.addView(menu, lp);
+    }
+
+    private TextView menuItem(String label, Runnable action) {
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        t.setTextColor(0xFF212121);
+        t.setPadding(dp(14), dp(12), dp(18), dp(12));
+        t.setOnClickListener(v -> {
+            dismissMenu();
+            action.run();
+        });
+        return t;
+    }
+
+    private void dismissMenu() {
+        if (menu != null) {
+            try { wm.removeView(menu); } catch (Exception ignored) {}
+            menu = null;
         }
     }
 
@@ -446,6 +533,7 @@ public class TranslatorService extends AccessibilityService {
         Rect bub = bubbleRect;
         List<Rect> rects = new ArrayList<>();
         List<String> texts = new ArrayList<>();
+        List<Float> heights = new ArrayList<>();
         for (Bubbles.Bubble b : Bubbles.group(lines)) {
             if (b.soundEffect) continue;            // no traducir "BOOM", "CRASH", etc.
             String t = cleanText(b.text);
@@ -455,6 +543,7 @@ public class TranslatorService extends AccessibilityService {
             if (!clean && Rect.intersects(screen, bub)) continue; // no traducir nuestra burbuja
             rects.add(screen);
             texts.add(t);
+            heights.add(b.lineHeight);
             if (rects.size() >= MAX_BLOCKS) break;
         }
         if (gen != generation) return;
@@ -463,6 +552,7 @@ public class TranslatorService extends AccessibilityService {
         List<String> translated = translator.translateAll(texts, pool);
         List<Rect> outRects = new ArrayList<>();
         List<String> outTexts = new ArrayList<>();
+        List<Float> outHeights = new ArrayList<>();
         int errors = 0;
         for (int i = 0; i < texts.size(); i++) {
             String tr = translated.get(i);
@@ -470,6 +560,7 @@ public class TranslatorService extends AccessibilityService {
             if (!tr.trim().isEmpty() && !tr.trim().equalsIgnoreCase(texts.get(i))) {
                 outRects.add(rects.get(i));
                 outTexts.add(tr.trim());
+                outHeights.add(heights.get(i));
             }
         }
         if (gen != generation) return;
@@ -480,7 +571,8 @@ public class TranslatorService extends AccessibilityService {
         // ---- marcar las celdas cubiertas y mostrar
         boolean[] mask = new boolean[sig.length];
         float sx = (float) GRID_W / bmp.getWidth(), sy = (float) gridH / bmp.getHeight();
-        List<Rect> maskRects = new ArrayList<>(outRects);
+        List<Rect> maskRects = new ArrayList<>();
+        for (int i = 0; i < outRects.size(); i++) maskRects.add(labelRect(outRects.get(i), outHeights.get(i)));
         if (!clean) maskRects.add(bub);
         for (Rect r : maskRects) {
             int x0 = Math.max(0, (int) ((r.left - offX) * sx));
@@ -492,7 +584,7 @@ public class TranslatorService extends AccessibilityService {
         textMask = mask;
         ref = sig;
         overlayShown = !outRects.isEmpty();
-        main.post(() -> { if (gen == generation) showLabels(outRects, outTexts); });
+        main.post(() -> { if (gen == generation) showLabels(outRects, outTexts, outHeights); });
     }
 
     private void hideLabels() {
@@ -587,35 +679,93 @@ public class TranslatorService extends AccessibilityService {
         }
     }
 
-    private void showLabels(List<Rect> rects, List<String> texts) {
+    /** Zona que cubre la etiqueta: el texto original más un margen proporcional al tamaño de letra. */
+    private Rect labelRect(Rect r, float lineH) {
+        int padX = Math.round(Math.max(dp(4), lineH * 0.55f));
+        int padY = Math.round(Math.max(dp(3), lineH * 0.40f));
+        Rect out = new Rect(r.left - padX, r.top - padY, r.right + padX, r.bottom + padY);
+        if (out.width() < dp(30)) out.inset(-(dp(30) - out.width()) / 2, 0);
+        if (out.height() < dp(18)) out.inset(0, -(dp(18) - out.height()) / 2);
+        return out;
+    }
+
+    private void showLabels(List<Rect> rects, List<String> texts, List<Float> heights) {
         if (overlay == null || !live) return;
         overlay.getLocationOnScreen(overlayLoc);
         overlay.removeAllViews();
         int alpha = Math.round(Prefs.opacity(this) * 2.55f);
+        Typeface face = Typeface.create("sans-serif-condensed", Typeface.BOLD);
 
         for (int i = 0; i < rects.size(); i++) {
-            Rect r = rects.get(i);
+            Rect box = labelRect(rects.get(i), heights.get(i));
+            String text = texts.get(i);
+
             TextView tv = new TextView(this);
-            tv.setText(texts.get(i));
+            tv.setTypeface(face);
             tv.setTextColor(0xFF111111);
-            tv.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
             tv.setGravity(Gravity.CENTER);
             tv.setIncludeFontPadding(false);
-            tv.setPadding(dp(2), dp(1), dp(2), dp(1));
-            tv.setAutoSizeTextTypeUniformWithConfiguration(6, 22, 1, TypedValue.COMPLEX_UNIT_SP);
+            tv.setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED);
+            tv.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
+            int inner = dp(2);
+            tv.setPadding(inner, inner, inner, inner);
+
+            // Elegir el tamaño de letra más grande que quepa SIN partir palabras.
+            float[] fit = fitText(text, tv.getPaint(), box.width() - inner * 2, box.height() - inner * 2);
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, fit[0]);
+            int w = Math.round(fit[1]) + inner * 2;
+            int left = box.centerX() - w / 2;
+            tv.setText(text);
+
             GradientDrawable bg = new GradientDrawable();
             bg.setColor(Color.argb(alpha, 255, 255, 255));
             bg.setCornerRadius(dp(6));
             tv.setBackground(bg);
 
-            // Un poco más grande que el texto original para que el español (más largo) quepa.
-            int padX = Math.max(dp(2), r.width() / 12), padY = Math.max(dp(2), r.height() / 10);
-            int w = Math.max(r.width() + padX * 2, dp(28));
-            int h = Math.max(r.height() + padY * 2, dp(16));
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, h);
-            lp.leftMargin = r.left - padX - overlayLoc[0];
-            lp.topMargin = r.top - padY - overlayLoc[1];
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, box.height());
+            lp.leftMargin = left - overlayLoc[0];
+            lp.topMargin = box.top - overlayLoc[1];
             overlay.addView(tv, lp);
         }
+    }
+
+    /**
+     * Busca el tamaño de letra más grande con el que el texto cabe en la caja sin cortar
+     * ninguna palabra. Si no cabe, prueba ensanchando la caja un poco.
+     * @return {tamaño en px, ancho usado en px}
+     */
+    private float[] fitText(String text, android.text.TextPaint basePaint, int width, int height) {
+        android.text.TextPaint paint = new android.text.TextPaint(basePaint);
+        float density = getResources().getDisplayMetrics().scaledDensity;
+        float[] widthFactors = {1f, 1.25f, 1.5f};
+        float[] minSp = {8f, 7f, 6f};
+        for (int f = 0; f < widthFactors.length; f++) {
+            int w = Math.max(1, Math.round(width * widthFactors[f]));
+            for (float sp = 22f; sp >= minSp[f]; sp -= 0.5f) {
+                paint.setTextSize(sp * density);
+                android.text.StaticLayout layout = android.text.StaticLayout.Builder
+                        .obtain(text, 0, text.length(), paint, w)
+                        .setIncludePad(false)
+                        .setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED)
+                        .setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE)
+                        .build();
+                if (layout.getHeight() <= height && !breaksWords(layout, text)) {
+                    return new float[]{sp * density, w};
+                }
+            }
+        }
+        return new float[]{6f * density, Math.round(width * 1.5f)};
+    }
+
+    private static boolean breaksWords(android.text.StaticLayout layout, String text) {
+        for (int i = 0; i < layout.getLineCount() - 1; i++) {
+            int end = layout.getLineEnd(i);
+            if (end > 0 && end < text.length()
+                    && Character.isLetterOrDigit(text.charAt(end - 1))
+                    && Character.isLetterOrDigit(text.charAt(end))) {
+                return true;
+            }
+        }
+        return false;
     }
 }

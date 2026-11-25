@@ -13,6 +13,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.Spinner;
 import android.widget.TextView;
 
@@ -21,6 +22,7 @@ public class MainActivity extends Activity {
 
     private TextView status;
     private Button toggle;
+    private Switch bubbleSwitch;
     private LinearLayout root;
 
     private interface OnPick { void pick(int index); }
@@ -56,6 +58,31 @@ public class MainActivity extends Activity {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(toggle);
 
+        bubbleSwitch = new Switch(this);
+        bubbleSwitch.setText("Mostrar burbuja flotante");
+        bubbleSwitch.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        bubbleSwitch.setPadding(0, dp(16), 0, dp(4));
+        bubbleSwitch.setOnCheckedChangeListener((b, checked) -> {
+            Prefs.setBubbleEnabled(this, checked);
+            TranslatorService.applyBubblePref(this);
+        });
+        root.addView(bubbleSwitch);
+
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            Button addTile = new Button(this);
+            addTile.setText("Agregar botón \"Traductor\" al panel rápido");
+            addTile.setOnClickListener(v -> {
+                android.app.StatusBarManager sbm = getSystemService(android.app.StatusBarManager.class);
+                sbm.requestAddTileService(
+                        new android.content.ComponentName(this, BubbleTileService.class),
+                        "Traductor",
+                        android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_tile),
+                        getMainExecutor(),
+                        result -> { });
+            });
+            root.addView(addTile);
+        }
+
         spinner("Idioma del texto (origen):", Prefs.SRC_NAMES,
                 indexOf(Prefs.SRC_CODES, Prefs.sourceLang(this)),
                 i -> Prefs.setSourceLang(this, Prefs.SRC_CODES[i]));
@@ -79,13 +106,18 @@ public class MainActivity extends Activity {
         help.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         help.setTextColor(Color.DKGRAY);
         help.setPadding(0, dp(20), 0, 0);
-        help.setText("Cómo usarla:\n"
+        help.setText("Encender y apagar:\n"
+                + "• Botón \"Traductor\" del panel rápido (deslice la barra de arriba hacia abajo): "
+                + "un toque muestra u oculta la burbuja.\n"
+                + "• Mantener presionada la burbuja → Ocultar burbuja.\n"
+                + "• El interruptor \"Mostrar burbuja flotante\" de esta pantalla.\n\n"
+                + "Cómo usarla:\n"
                 + "1. Pulse el botón de arriba, busque \"Screen Translator\" en Accesibilidad y actívelo.\n"
                 + "2. Aparece una burbuja azul (文A). Arrástrela a una esquina donde no estorbe.\n"
                 + "3. Abra su manga o juego y toque la burbuja: se pone verde (ON) y la traducción "
                 + "se actualiza sola al pasar de página, desplazarse o cambiar el diálogo.\n"
                 + "4. Puede seguir tocando y deslizando la app normalmente; la capa no bloquea los toques.\n"
-                + "5. Toque la burbuja otra vez para apagar. Manténgala presionada para volver aquí.\n\n"
+                + "5. Toque la burbuja otra vez para detener. Manténgala presionada para ver el menú.\n\n"
                 + "Consejos:\n"
                 + "• Manga/webtoon: sensibilidad 7–10.\n"
                 + "• Juegos con fondos animados: sensibilidad 2–4.\n"
@@ -151,5 +183,7 @@ public class MainActivity extends Activity {
                 : "✖ Servicio desactivado. Actívelo para mostrar la burbuja.");
         status.setTextColor(on ? 0xFF2E7D32 : 0xFFC62828);
         toggle.setText(on ? "Ajustes de accesibilidad (desactivar)" : "Activar en Accesibilidad");
+        bubbleSwitch.setChecked(Prefs.bubbleEnabled(this));
+        bubbleSwitch.setEnabled(on);
     }
 }
