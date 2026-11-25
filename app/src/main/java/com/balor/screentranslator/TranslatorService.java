@@ -6,6 +6,7 @@ import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.HardwareBuffer;
 import android.os.Build;
@@ -35,10 +36,8 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -422,16 +421,36 @@ public class TranslatorService extends AccessibilityService {
         }
 
         // ---- OCR
-        Text result = Tasks.await(recognizer.process(InputImage.fromBitmap(bmp, 0)), 6, TimeUnit.SECONDS);
+        // Ampliar la imagen: la letra de los globos suele ser pequeña y el OCR lee mejor a más resolución.
+        float up = bmp.getWidth() < 1440 ? 1.5f : 1f;
+        Bitmap ocrBmp = up > 1f
+                ? Bitmap.createScaledBitmap(bmp, Math.round(bmp.getWidth() * up), Math.round(bmp.getHeight() * up), true)
+                : bmp;
+        Text result;
+        try {
+            result = Tasks.await(recognizer.process(InputImage.fromBitmap(ocrBmp, 0)), 8, TimeUnit.SECONDS);
+        } finally {
+            if (ocrBmp != bmp) ocrBmp.recycle();
+        }
+
+        // Tomar línea por línea y reconstruir los globos (el OCR a veces corta o junta globos).
+        List<Bubbles.Line> lines = new ArrayList<>();
+        for (Text.TextBlock block : result.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                Rect r = line.getBoundingBox();
+                if (r == null || line.getText() == null) continue;
+                lines.add(new Bubbles.Line(Math.round(r.left / up), Math.round(r.top / up),
+                        Math.round(r.right / up), Math.round(r.bottom / up), line.getText()));
+            }
+        }
         Rect bub = bubbleRect;
         List<Rect> rects = new ArrayList<>();
         List<String> texts = new ArrayList<>();
-        for (Text.TextBlock block : result.getTextBlocks()) {
-            Rect r = block.getBoundingBox();
-            if (r == null) continue;
-            String t = cleanText(block.getText());
+        for (Bubbles.Bubble b : Bubbles.group(lines)) {
+            if (b.soundEffect) continue;            // no traducir "BOOM", "CRASH", etc.
+            String t = cleanText(b.text);
             if (!isTranslatable(t)) continue;
-            Rect screen = new Rect(r);
+            Rect screen = new Rect(b.left, b.top, b.right, b.bottom);
             screen.offset(offX, offY);
             if (!clean && Rect.intersects(screen, bub)) continue; // no traducir nuestra burbuja
             rects.add(screen);
@@ -440,27 +459,21 @@ public class TranslatorService extends AccessibilityService {
         }
         if (gen != generation) return;
 
-        // ---- traducción en paralelo (la caché hace que lo ya visto sea instantáneo)
-        List<Future<String>> futures = new ArrayList<>();
-        for (String t : texts) {
-            futures.add(pool.submit((Callable<String>) () -> translator.translate(t)));
-        }
+        // ---- traducción: todos los globos juntos para que tenga el contexto de la conversación
+        List<String> translated = translator.translateAll(texts, pool);
         List<Rect> outRects = new ArrayList<>();
         List<String> outTexts = new ArrayList<>();
         int errors = 0;
-        for (int i = 0; i < futures.size(); i++) {
-            try {
-                String tr = futures.get(i).get(10, TimeUnit.SECONDS);
-                if (tr != null && !tr.trim().isEmpty() && !tr.trim().equalsIgnoreCase(texts.get(i))) {
-                    outRects.add(rects.get(i));
-                    outTexts.add(tr.trim());
-                }
-            } catch (Exception e) {
-                errors++;
+        for (int i = 0; i < texts.size(); i++) {
+            String tr = translated.get(i);
+            if (tr == null) { errors++; continue; }
+            if (!tr.trim().isEmpty() && !tr.trim().equalsIgnoreCase(texts.get(i))) {
+                outRects.add(rects.get(i));
+                outTexts.add(tr.trim());
             }
         }
         if (gen != generation) return;
-        if (!futures.isEmpty() && errors == futures.size()) {
+        if (!texts.isEmpty() && errors == texts.size()) {
             toast("No se pudo traducir. Revise Internet o use el motor sin conexión.");
         }
 
@@ -502,6 +515,13 @@ public class TranslatorService extends AccessibilityService {
             }
         }
         if (letters >= 3 && upper > letters * 0.8f) {
+            // Errores típicos del OCR con letra de cómic (todo en mayúsculas).
+            s = s.replace('|', 'I')
+                    .replaceAll("(?<=\\p{Lu})0(?=\\p{Lu})|(?<=\\s)0(?=\\p{Lu}{2})", "O")
+                    .replaceAll("\\bl\\b", "I")
+                    .replaceAll("(?<=\\p{Lu})l(?=\\p{Lu})", "I")
+                    .replaceAll("\\s+([!?.,])", "$1")
+                    .replaceAll("([!?])\\s+(?=[!?])", "$1");
             StringBuilder sb = new StringBuilder(s.toLowerCase());
             boolean cap = true;
             for (int i = 0; i < sb.length(); i++) {
@@ -518,10 +538,18 @@ public class TranslatorService extends AccessibilityService {
         return s;
     }
 
-    private static boolean isTranslatable(String t) {
+    /** Descarta números, símbolos y onomatopeyas sin vocales ("HMM", "TSK", "GRR"). */
+    static boolean isTranslatable(String t) {
         int letters = 0;
-        for (int i = 0; i < t.length(); i++) if (Character.isLetter(t.charAt(i))) letters++;
-        return letters >= 2;
+        boolean vowel = false;
+        for (int i = 0; i < t.length(); i++) {
+            char c = t.charAt(i);
+            if (Character.isLetter(c)) {
+                letters++;
+                if ("aeiouyáéíóúAEIOUYÁÉÍÓÚ".indexOf(c) >= 0) vowel = true;
+            }
+        }
+        return letters >= 2 && vowel;
     }
 
     // =================================================================== capa de traducción (main)
@@ -570,6 +598,7 @@ public class TranslatorService extends AccessibilityService {
             TextView tv = new TextView(this);
             tv.setText(texts.get(i));
             tv.setTextColor(0xFF111111);
+            tv.setTypeface(Typeface.create("sans-serif-condensed", Typeface.BOLD));
             tv.setGravity(Gravity.CENTER);
             tv.setIncludeFontPadding(false);
             tv.setPadding(dp(2), dp(1), dp(2), dp(1));
