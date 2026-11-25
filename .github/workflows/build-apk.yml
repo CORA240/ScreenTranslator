@@ -27,8 +27,17 @@ jobs:
       - name: Llave de firma persistente
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: signing-keystore-v1
+          path: ~/st-signing/app.jks
+          key: signing-keystore-v2
+
+      - name: Crear llave si no existe
+        run: |
+          mkdir -p ~/st-signing
+          if [ ! -f ~/st-signing/app.jks ]; then
+            keytool -genkeypair -noprompt -keystore ~/st-signing/app.jks -storepass screentr -keypass screentr \
+              -alias app -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Screen Translator"
+          fi
+          echo "ST_KEYSTORE=$HOME/st-signing/app.jks" >> "$GITHUB_ENV"
 
       - name: Compilar
         run: gradle assembleRelease --no-daemon

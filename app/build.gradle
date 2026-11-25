@@ -14,11 +14,20 @@ android {
         versionName '2.2'
     }
 
+    signingConfigs {
+        // Llave fija creada por GitHub Actions (ver .github/workflows). Sin ella, usa la de depuración.
+        stable {
+            storeFile System.getenv('ST_KEYSTORE') ? file(System.getenv('ST_KEYSTORE')) : null
+            storePassword 'screentr'
+            keyAlias 'app'
+            keyPassword 'screentr'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            // Firma el release con la llave de depuración para que el APK sea instalable directamente.
-            signingConfig signingConfigs.debug
+            signingConfig System.getenv('ST_KEYSTORE') ? signingConfigs.stable : signingConfigs.debug
         }
     }
 
