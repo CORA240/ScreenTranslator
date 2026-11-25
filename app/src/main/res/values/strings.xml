@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Screen Translator</string>
+    <string name="service_name">Screen Translator (traductor en vivo)</string>
+    <string name="service_description">Muestra una burbuja flotante. Al activarla, toma capturas de la pantalla, reconoce el texto (también en imágenes, manga y juegos) y coloca la traducción encima del original, actualizándola cuando la pantalla cambia. Con el motor en línea, el texto reconocido se envía a Google Translate.</string>
+</resources>
