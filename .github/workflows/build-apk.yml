@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -29,3 +32,15 @@ jobs:
         with:
           name: ScreenTranslator-apk
           path: ScreenTranslator.apk
+
+      - name: Publicar en Releases (descarga directa)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0.${{ github.run_number }}
+          name: Screen Translator v2.0.${{ github.run_number }}
+          make_latest: true
+          files: ScreenTranslator.apk
+          body: |
+            APK listo para instalar en Android 11 o superior.
+            Descargue **ScreenTranslator.apk** abajo, en "Assets".
