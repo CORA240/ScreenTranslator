@@ -22,6 +22,16 @@ android {
         }
     }
 
+    // Un APK por tipo de procesador para que pese menos (los teléfonos usan ARM).
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'armeabi-v7a'
+            universalApk false
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17

@@ -26,12 +26,15 @@ jobs:
         run: gradle assembleRelease --no-daemon
 
       - name: Renombrar APK
-        run: cp app/build/outputs/apk/release/app-release.apk ScreenTranslator.apk
+        run: |
+          cp app/build/outputs/apk/release/app-arm64-v8a-release.apk ScreenTranslator-arm64.apk
+          cp app/build/outputs/apk/release/app-armeabi-v7a-release.apk ScreenTranslator-arm32.apk
+          ls -la *.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: ScreenTranslator-apk
-          path: ScreenTranslator.apk
+          path: ScreenTranslator-*.apk
 
       - name: Publicar en Releases (descarga directa)
         if: github.ref == 'refs/heads/main'
@@ -40,7 +43,8 @@ jobs:
           tag_name: v2.0.${{ github.run_number }}
           name: Screen Translator v2.0.${{ github.run_number }}
           make_latest: true
-          files: ScreenTranslator.apk
+          files: ScreenTranslator-*.apk
           body: |
             APK listo para instalar en Android 11 o superior.
-            Descargue **ScreenTranslator.apk** abajo, en "Assets".
+            - **ScreenTranslator-arm64.apk** → casi todos los teléfonos (2017 en adelante). Use este.
+            - **ScreenTranslator-arm32.apk** → solo teléfonos muy viejos o de gama muy baja.
