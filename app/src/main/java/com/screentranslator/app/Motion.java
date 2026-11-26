@@ -113,4 +113,40 @@ public final class Motion {
         for (int x = l; x <= r; x += 2) { n++; if (lum.at(x, y) > 205) ok++; }
         return n > 0 && ok >= n * 0.92f;
     }
+
+    /**
+     * Evita que las etiquetas de globos vecinos se encimen: si dos cajas se cruzan, se
+     * reparte el espacio a la mitad entre los textos originales (sin tapar nunca el texto propio).
+     * @param boxes {left, top, right, bottom} de cada etiqueta (se modifican)
+     * @param texts {left, top, right, bottom} del texto original de cada globo
+     */
+    public static void resolveOverlaps(int[][] boxes, int[][] texts, int gap) {
+        for (int pass = 0; pass < 3; pass++) {
+            boolean changed = false;
+            for (int i = 0; i < boxes.length; i++) {
+                for (int j = i + 1; j < boxes.length; j++) {
+                    int[] a = boxes[i], b = boxes[j], ta = texts[i], tb = texts[j];
+                    if (a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1]) continue;
+                    // Separar por el eje donde los textos están más apartados.
+                    int gapX = Math.max(tb[0] - ta[2], ta[0] - tb[2]);
+                    int gapY = Math.max(tb[1] - ta[3], ta[1] - tb[3]);
+                    if (gapX >= gapY) {
+                        boolean aLeft = ta[0] + ta[2] <= tb[0] + tb[2];
+                        int[] L = aLeft ? a : b, R = aLeft ? b : a, tL = aLeft ? ta : tb, tR = aLeft ? tb : ta;
+                        int mid = (tL[2] + tR[0]) / 2;
+                        L[2] = Math.max(tL[2], Math.min(L[2], mid - gap));
+                        R[0] = Math.min(tR[0], Math.max(R[0], mid + gap));
+                    } else {
+                        boolean aTop = ta[1] + ta[3] <= tb[1] + tb[3];
+                        int[] T = aTop ? a : b, B = aTop ? b : a, tT = aTop ? ta : tb, tB = aTop ? tb : ta;
+                        int mid = (tT[3] + tB[1]) / 2;
+                        T[3] = Math.max(tT[3], Math.min(T[3], mid - gap));
+                        B[1] = Math.min(tB[1], Math.max(B[1], mid + gap));
+                    }
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+        }
+    }
 }

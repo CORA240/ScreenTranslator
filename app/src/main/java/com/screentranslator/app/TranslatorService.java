@@ -676,6 +676,7 @@ public class TranslatorService extends AccessibilityService {
         Rect bub = bubbleRect;
         int edge = Math.max(4, bh / 100);
         List<Rect> rects = new ArrayList<>();
+        List<Rect> textRects = new ArrayList<>();
         List<String> texts = new ArrayList<>();
         for (Bubbles.Bubble b : Bubbles.group(lines)) {
             if (b.soundEffect) continue;            // no traducir "BOOM", "CRASH", etc.
@@ -695,11 +696,24 @@ public class TranslatorService extends AccessibilityService {
             }
             r.offset(offX, offY);
             if (!clean && Rect.intersects(r, bub)) continue;   // no traducir nuestra burbuja
+            Rect tr0 = new Rect(b.left, b.top, b.right, b.bottom);
+            tr0.offset(offX, offY);
             rects.add(r);
+            textRects.add(tr0);
             texts.add(t);
             if (rects.size() >= MAX_BLOCKS) break;
         }
         if (gen != generation) return;
+
+        // Que las etiquetas de globos vecinos no se encimen ni tapen el texto del otro.
+        int[][] bx = new int[rects.size()][], tx = new int[rects.size()][];
+        for (int i = 0; i < rects.size(); i++) {
+            Rect r = rects.get(i), t = textRects.get(i);
+            bx[i] = new int[]{r.left, r.top, r.right, r.bottom};
+            tx[i] = new int[]{t.left, t.top, t.right, t.bottom};
+        }
+        Motion.resolveOverlaps(bx, tx, dp(2));
+        for (int i = 0; i < rects.size(); i++) rects.get(i).set(bx[i][0], bx[i][1], bx[i][2], bx[i][3]);
 
         // ---- traducción: todos los globos juntos para que tenga el contexto de la conversación
         List<String> translated = translator.translateAll(texts, pool);
@@ -869,7 +883,7 @@ public class TranslatorService extends AccessibilityService {
             // Tamaño de letra más grande que quepa SIN partir palabras; si no cabe, la caja crece.
             float[] fit = fitText(text, tv.getPaint(), box.width() - inner * 2, box.height() - inner * 2);
             tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, fit[0]);
-            int w = Math.max(box.width(), Math.round(fit[1]) + inner * 2);
+            int w = box.width();
             int h = Math.max(box.height(), Math.round(fit[2]) + inner * 2);
             tv.setText(text);
 
@@ -879,8 +893,8 @@ public class TranslatorService extends AccessibilityService {
             tv.setBackground(bg);
 
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, h);
-            lp.leftMargin = box.centerX() - w / 2 - overlayLoc[0];
-            lp.topMargin = box.centerY() - h / 2 - overlayLoc[1];
+            lp.leftMargin = box.left - overlayLoc[0];
+            lp.topMargin = (h > box.height() ? box.top : box.centerY() - h / 2) - overlayLoc[1];
             content.addView(tv, lp);
         }
     }
@@ -893,8 +907,9 @@ public class TranslatorService extends AccessibilityService {
     private float[] fitText(String text, android.text.TextPaint basePaint, int width, int height) {
         android.text.TextPaint paint = new android.text.TextPaint(basePaint);
         float density = getResources().getDisplayMetrics().scaledDensity;
-        float[] widthFactors = {1f, 1.25f, 1.5f};
-        float[] minSp = {8f, 7f, 6f};
+        // Nunca ensanchar (taparía el globo vecino): si no cabe, la caja crece hacia abajo.
+        float[] widthFactors = {1f};
+        float[] minSp = {7f};
         for (int f = 0; f < widthFactors.length; f++) {
             int w = Math.max(1, Math.round(width * widthFactors[f]));
             for (float sp = 22f; sp >= minSp[f]; sp -= 0.5f) {
@@ -911,7 +926,7 @@ public class TranslatorService extends AccessibilityService {
             }
         }
         // No cabe ni con letra mínima: usar 7sp y dejar que la caja crezca hacia abajo.
-        int w = Math.max(1, Math.round(width * 1.5f));
+        int w = Math.max(1, width);
         paint.setTextSize(7f * density);
         android.text.StaticLayout layout = android.text.StaticLayout.Builder
                 .obtain(text, 0, text.length(), paint, w).setIncludePad(false).build();
