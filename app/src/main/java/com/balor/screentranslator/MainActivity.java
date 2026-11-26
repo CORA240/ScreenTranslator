@@ -59,7 +59,7 @@ public class MainActivity extends Activity {
         root.addView(toggle);
 
         bubbleSwitch = new Switch(this);
-        bubbleSwitch.setText("Mostrar burbuja flotante");
+        bubbleSwitch.setText("Traductor encendido");
         bubbleSwitch.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         bubbleSwitch.setPadding(0, dp(16), 0, dp(4));
         bubbleSwitch.setOnCheckedChangeListener((b, checked) -> {
@@ -106,11 +106,13 @@ public class MainActivity extends Activity {
         help.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         help.setTextColor(Color.DKGRAY);
         help.setPadding(0, dp(20), 0, 0);
-        help.setText("Encender y apagar:\n"
+        help.setText("Encender y apagar (empieza siempre apagado):\n"
                 + "• Botón \"Traductor\" del panel rápido (deslice la barra de arriba hacia abajo): "
-                + "un toque muestra u oculta la burbuja.\n"
-                + "• Mantener presionada la burbuja → Ocultar burbuja.\n"
-                + "• El interruptor \"Mostrar burbuja flotante\" de esta pantalla.\n\n"
+                + "un toque lo enciende y aparece la burbuja; otro toque lo apaga y la burbuja desaparece.\n"
+                + "• Mantener presionada la burbuja → Apagar traductor.\n"
+                + "• El interruptor \"Traductor encendido\" de esta pantalla.\n\n"
+                + "Ahorro de batería: apagado no consume nada. Encendido, revisa la pantalla más lento "
+                + "cuando no hay cambios, se pausa al apagar la pantalla y tras 5 minutos sin cambios.\n\n"
                 + "Cómo usarla:\n"
                 + "1. Pulse el botón de arriba, busque \"Screen Translator\" en Accesibilidad y actívelo.\n"
                 + "2. Aparece una burbuja azul (文A). Arrástrela a una esquina donde no estorbe.\n"

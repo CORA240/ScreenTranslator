@@ -9,7 +9,7 @@ import android.service.quicksettings.Tile;
 import android.service.quicksettings.TileService;
 import android.widget.Toast;
 
-/** Botón "Traductor" del panel rápido: un toque muestra u oculta la burbuja flotante. */
+/** Botón "Traductor" del panel rápido: un toque enciende (burbuja + traducción) o apaga todo. */
 public class BubbleTileService extends TileService {
 
     /** Pide a Android que actualice el estado del botón. */
@@ -49,7 +49,7 @@ public class BubbleTileService extends TileService {
         boolean on = TranslatorService.isRunning() && Prefs.bubbleEnabled(this);
         tile.setState(on ? Tile.STATE_ACTIVE : Tile.STATE_INACTIVE);
         tile.setLabel("Traductor");
-        tile.setSubtitle(!TranslatorService.isRunning() ? "Servicio apagado" : on ? "Burbuja visible" : "Burbuja oculta");
+        tile.setSubtitle(!TranslatorService.isRunning() ? "Sin permiso" : on ? "Encendido" : "Apagado");
         tile.updateTile();
     }
 }

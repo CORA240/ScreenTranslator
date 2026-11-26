@@ -54,6 +54,9 @@ import java.util.concurrent.TimeUnit;
 public class TranslatorService extends AccessibilityService {
 
     private static final long INTERVAL_MS = 400;        // mínimo permitido por Android: 333 ms
+    private static final long IDLE_SLOW_MS = 4_000;     // sin cambios 4 s  → revisar cada 0.8 s
+    private static final long IDLE_SLOWER_MS = 15_000;  // sin cambios 15 s → revisar cada 1.5 s
+    private static final long IDLE_PAUSE_MS = 5 * 60_000; // sin cambios 5 min → pausar solo
     private static final long FORCE_AFTER_MS = 1500;    // traducir aunque la pantalla siga animada
     private static final int GRID_W = 36;               // resolución de la firma para detectar cambios
     private static final float STABLE_T = 0.02f;
@@ -95,11 +98,21 @@ public class TranslatorService extends AccessibilityService {
         super.onServiceConnected();
         instance = this;
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-        recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         translator = new TextTranslator(this);
-        if (Prefs.bubbleEnabled(this)) showBubble();
+        // Siempre arranca APAGADO (también al reiniciar el teléfono): cero consumo hasta que se encienda.
+        Prefs.setBubbleEnabled(this, false);
         BubbleTileService.refresh(this);
+        android.content.IntentFilter f = new android.content.IntentFilter(Intent.ACTION_SCREEN_OFF);
+        registerReceiver(screenOff, f);
     }
+
+    /** Al apagar la pantalla se pausa la traducción para no gastar batería. */
+    private final android.content.BroadcastReceiver screenOff = new android.content.BroadcastReceiver() {
+        @Override
+        public void onReceive(android.content.Context c, Intent i) {
+            if (live) stopLive();
+        }
+    };
 
     /** Muestra u oculta la burbuja según el ajuste (lo llaman el botón del panel rápido y la app). */
     public static void applyBubblePref(android.content.Context ctx) {
@@ -112,11 +125,17 @@ public class TranslatorService extends AccessibilityService {
         boolean want = Prefs.bubbleEnabled(this);
         if (want && bubble == null) {
             showBubble();
+            startLive();                       // encender = mostrar burbuja y empezar a traducir
         } else if (!want && bubble != null) {
             stopLive();
             dismissMenu();
             try { wm.removeView(bubble); } catch (Exception ignored) {}
             bubble = null;
+            // Liberar OCR y modelos de memoria mientras está apagado.
+            worker.execute(() -> {
+                if (recognizer != null) { recognizer.close(); recognizer = null; }
+                translator.close();
+            });
         }
     }
 
@@ -125,6 +144,7 @@ public class TranslatorService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        try { unregisterReceiver(screenOff); } catch (Exception ignored) {}
         stopLive();
         dismissMenu();
         if (bubble != null) {
@@ -258,11 +278,11 @@ public class TranslatorService extends AccessibilityService {
             if (live) stopLive(); else startLive();
         }));
         menu.addView(menuItem("⚙  Ajustes", this::openSettings));
-        menu.addView(menuItem("✕  Ocultar burbuja", () -> {
+        menu.addView(menuItem("⏻  Apagar traductor", () -> {
             Prefs.setBubbleEnabled(this, false);
             updateBubbleVisibility();
             BubbleTileService.refresh(this);
-            Toast.makeText(this, "Burbuja oculta. Actívela desde el panel rápido o la app.",
+            Toast.makeText(this, "Traductor apagado. Enciéndalo con el botón \"Traductor\" del panel rápido.",
                     Toast.LENGTH_LONG).show();
         }));
 
@@ -319,8 +339,12 @@ public class TranslatorService extends AccessibilityService {
         final int gen = ++generation;
         paintBubble();
         addOverlayWindow();
+        lastActivity = System.currentTimeMillis();
         worker.execute(() -> {
             resetState();
+            if (recognizer == null) {
+                recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+            }
             if (Prefs.ENGINE_OFFLINE.equals(Prefs.engine(this))) {
                 toast("Preparando traductor sin conexión (la primera vez descarga ~30 MB)…");
                 try {
@@ -345,6 +369,22 @@ public class TranslatorService extends AccessibilityService {
     }
 
     private final Runnable tickRunnable = this::tick;
+
+    /** Última vez que la pantalla cambió: si no cambia, se revisa menos seguido (ahorra batería). */
+    private volatile long lastActivity;
+
+    private long nextInterval() {
+        long idle = System.currentTimeMillis() - lastActivity;
+        if (idle > IDLE_PAUSE_MS) {
+            stopLive();
+            Toast.makeText(this, "Traducción en pausa (sin cambios en 5 min). Toque la burbuja para seguir.",
+                    Toast.LENGTH_LONG).show();
+            return -1;
+        }
+        if (idle > IDLE_SLOWER_MS) return 1500;
+        if (idle > IDLE_SLOW_MS) return 800;
+        return INTERVAL_MS;
+    }
 
     private void scheduleNext(long delay) {
         main.removeCallbacks(tickRunnable);
@@ -425,7 +465,10 @@ public class TranslatorService extends AccessibilityService {
                 // Captura u OCR fallidos: se reintenta en el siguiente ciclo.
             } finally {
                 if (bmp != null) bmp.recycle();
-                if (gen == generation) main.post(() -> scheduleNext(INTERVAL_MS));
+                if (gen == generation) main.post(() -> {
+                    long next = nextInterval();
+                    if (next > 0) scheduleNext(next);
+                });
             }
         }
 
@@ -494,6 +537,7 @@ public class TranslatorService extends AccessibilityService {
             // La pantalla cambió: hay que volver a traducir cuando se quede quieta.
             ref = null;
             changeAt = now;
+            lastActivity = now;
             if (!clean || outside >= BIG_CHANGE_T) hideLabels(); // desplazamiento o cambio de página
             return;
         }
