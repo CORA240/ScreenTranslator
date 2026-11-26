@@ -134,12 +134,36 @@ public class TranslatorService extends AccessibilityService {
             // Liberar OCR y modelos de memoria mientras está apagado.
             worker.execute(() -> {
                 if (recognizer != null) { recognizer.close(); recognizer = null; }
+            pixBuf = null;
                 translator.close();
             });
         }
     }
 
-    @Override public void onAccessibilityEvent(AccessibilityEvent event) {}
+    @Override
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+        // La app avisa cuánto se desplazó: mover las traducciones al instante, sin esperar captura.
+        if (!live || event.getEventType() != AccessibilityEvent.TYPE_VIEW_SCROLLED) return;
+        if (getPackageName().contentEquals(String.valueOf(event.getPackageName()))) return;
+        int dy = event.getScrollDeltaY();
+        if (dy == -1 || dy == 0) return;
+        scrollPos += dy;
+        lastScrollEvt = System.currentTimeMillis();
+        lastActivity = lastScrollEvt;
+        applyScroll();
+        if (!inFlight) scheduleNext(0);           // capturar ya para traducir lo que va entrando
+    }
+
+    // ---- seguimiento del scroll (hilo principal)
+    private float scrollPos;                // desplazamiento acumulado del contenido, en píxeles
+    private float labelsScroll;             // scrollPos en el momento de la captura de las etiquetas
+    private volatile long lastScrollEvt;
+    private boolean inFlight;               // hay una captura en proceso
+    private FrameLayout content;            // contenedor de etiquetas que se mueve con el scroll
+
+    private void applyScroll() {
+        if (content != null) content.setTranslationY(-(scrollPos - labelsScroll));
+    }
     @Override public void onInterrupt() {}
 
     @Override
@@ -340,6 +364,8 @@ public class TranslatorService extends AccessibilityService {
         paintBubble();
         addOverlayWindow();
         lastActivity = System.currentTimeMillis();
+        scrollPos = 0;
+        labelsScroll = 0;
         worker.execute(() -> {
             resetState();
             if (recognizer == null) {
@@ -362,6 +388,7 @@ public class TranslatorService extends AccessibilityService {
 
     private void stopLive() {
         live = false;
+        inFlight = false;
         generation++;
         main.removeCallbacks(tickRunnable);
         if (bubble != null) paintBubble();
@@ -381,6 +408,7 @@ public class TranslatorService extends AccessibilityService {
                     Toast.LENGTH_LONG).show();
             return -1;
         }
+        if (idle < 1500) return 340;            // desplazándose: lo más rápido que permite Android
         if (idle > IDLE_SLOWER_MS) return 1500;
         if (idle > IDLE_SLOW_MS) return 800;
         return INTERVAL_MS;
@@ -393,24 +421,27 @@ public class TranslatorService extends AccessibilityService {
 
     /** Hilo principal: pide una captura. */
     private void tick() {
-        if (!live) return;
+        if (!live || inFlight) return;
         final int gen = generation;
+        final float scrollAt = scrollPos;
+        inFlight = true;
 
         // Android 14+: capturar solo la ventana de la app (sin nuestra capa encima).
         if (Build.VERSION.SDK_INT >= 34 && windowModeOk) {
             AccessibilityWindowInfo w = findAppWindow();
-            if (ownFront) { scheduleNext(1000); return; }
+            if (ownFront) { inFlight = false; scheduleNext(1000); return; }
             if (w != null) {
                 Rect b = new Rect();
                 w.getBoundsInScreen(b);
-                takeScreenshotOfWindow(w.getId(), worker, new Shot(gen, true, b.left, b.top));
+                takeScreenshotOfWindow(w.getId(), worker, new Shot(gen, true, b.left, b.top, scrollAt));
                 return;
             }
         } else if (ownAppInFront()) {
+            inFlight = false;
             scheduleNext(1000);
             return;
         }
-        takeScreenshot(Display.DEFAULT_DISPLAY, worker, new Shot(gen, false, 0, 0));
+        takeScreenshot(Display.DEFAULT_DISPLAY, worker, new Shot(gen, false, 0, 0, scrollAt));
     }
 
     private boolean ownFront;
@@ -444,9 +475,10 @@ public class TranslatorService extends AccessibilityService {
         final int gen;
         final boolean clean;    // true = la captura no incluye nuestra capa
         final int offX, offY;   // posición de la captura en la pantalla
+        final float scrollAt;   // scroll en el momento de pedir la captura
 
-        Shot(int gen, boolean clean, int offX, int offY) {
-            this.gen = gen; this.clean = clean; this.offX = offX; this.offY = offY;
+        Shot(int gen, boolean clean, int offX, int offY, float scrollAt) {
+            this.gen = gen; this.clean = clean; this.offX = offX; this.offY = offY; this.scrollAt = scrollAt;
         }
 
         @Override
@@ -460,12 +492,14 @@ public class TranslatorService extends AccessibilityService {
                     hw.recycle();
                 }
                 hb.close();
-                if (bmp != null && gen == generation) process(bmp, clean, offX, offY, gen);
+                if (bmp != null && gen == generation) process(bmp, clean, offX, offY, gen, scrollAt);
             } catch (Exception e) {
                 // Captura u OCR fallidos: se reintenta en el siguiente ciclo.
             } finally {
                 if (bmp != null) bmp.recycle();
-                if (gen == generation) main.post(() -> {
+                main.post(() -> {
+                    inFlight = false;
+                    if (gen != generation) return;
                     long next = nextInterval();
                     if (next > 0) scheduleNext(next);
                 });
@@ -474,6 +508,7 @@ public class TranslatorService extends AccessibilityService {
 
         @Override
         public void onFailure(int errorCode) {
+            main.post(() -> inFlight = false);
             if (gen != generation) return;
             // Si la app no permite capturar su ventana, usar captura de pantalla completa.
             if (clean && errorCode != ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) windowModeOk = false;
@@ -488,6 +523,7 @@ public class TranslatorService extends AccessibilityService {
         ref = null;
         prev = null;
         textMask = null;
+        prevProfile = null;
         overlayShown = false;
         changeAt = System.currentTimeMillis();
     }
@@ -524,36 +560,89 @@ public class TranslatorService extends AccessibilityService {
         return Math.max(0.01f, 0.11f - Prefs.sensitivity(this) * 0.01f);
     }
 
-    private void process(Bitmap bmp, boolean clean, int offX, int offY, int gen) throws Exception {
+    private int[] prevProfile;     // perfil por filas del cuadro anterior (worker)
+    private int[] pixBuf;          // memoria reutilizada para los píxeles de cada captura
+
+    private int[] profile(Bitmap bmp) {
+        int w = 32, h = Math.max(16, bmp.getHeight() / 4);
+        Bitmap small = Bitmap.createScaledBitmap(bmp, w, h, true);
+        int[] px = new int[w * h];
+        small.getPixels(px, 0, w, 0, 0, w, h);
+        small.recycle();
+        for (int i = 0; i < px.length; i++) {
+            int c = px[i];
+            px[i] = (((c >> 16) & 0xFF) * 3 + ((c >> 8) & 0xFF) * 6 + (c & 0xFF)) / 10;
+        }
+        return Motion.rowProfile(px, w, h);
+    }
+
+    private void process(Bitmap bmp, boolean clean, int offX, int offY, int gen, float scrollAt) throws Exception {
         long now = System.currentTimeMillis();
         int[] sig = signature(bmp);
 
-        if (ref != null) {
-            boolean[] mask = textMask;
-            float outside = diff(sig, ref, mask, 1);
-            float under = clean ? diff(sig, ref, mask, 2) : 0f;
-            prev = sig;
-            if (outside < changeThreshold() && under < TEXT_CHANGE_T) return; // nada nuevo
-            // La pantalla cambió: hay que volver a traducir cuando se quede quieta.
-            ref = null;
-            changeAt = now;
+        // ---- ¿se desplazó la pantalla? (para apps que no avisan su scroll)
+        int[] prof = profile(bmp);
+        int shiftRows = Motion.verticalShift(prevProfile, prof);
+        prevProfile = prof;
+        boolean eventsActive = now - lastScrollEvt < 800;
+        float shiftPx = 0;
+        if (shiftRows != Integer.MIN_VALUE) {
+            shiftPx = shiftRows * (bmp.getHeight() / (float) (prof.length / Motion.BANDS));
             lastActivity = now;
-            if (!clean || outside >= BIG_CHANGE_T) hideLabels(); // desplazamiento o cambio de página
-            return;
+            if (!eventsActive) {
+                final float d = shiftPx;
+                main.post(() -> { scrollPos += d; applyScroll(); });
+            }
+        }
+        boolean scrolling = eventsActive || shiftRows != Integer.MIN_VALUE;
+        // Posición de scroll que corresponde a ESTE cuadro.
+        final float frameScroll = scrollAt + (eventsActive ? 0 : shiftPx);
+
+        if (clean) {
+            // Android 14+: la captura no incluye nuestra capa → se puede traducir mientras se mueve.
+            if (ref != null && !scrolling) {
+                boolean[] mask = textMask;
+                float outside = diff(sig, ref, mask, 1);
+                float under = diff(sig, ref, mask, 2);
+                if (outside < changeThreshold() && under < TEXT_CHANGE_T) { prev = sig; return; }
+                ref = null;
+                changeAt = now;
+                lastActivity = now;
+                if (outside >= BIG_CHANGE_T) hideLabels();          // cambio de página
+            }
+            if (!scrolling && ref == null) {
+                // Cambio sin desplazamiento (página nueva, juego): esperar a que se quede quieta.
+                boolean stable = diff(sig, prev, null, 0) < STABLE_T;
+                boolean forced = now - changeAt > FORCE_AFTER_MS;
+                prev = sig;
+                if (!stable && !forced) return;
+            } else if (!scrolling) {
+                prev = sig;
+                return;
+            }
+            prev = sig;
+        } else {
+            // Android 11–13: nuestra capa sale en la captura → ocultarla y esperar a que se quede quieta.
+            if (ref != null) {
+                boolean[] mask = textMask;
+                float outside = diff(sig, ref, mask, 1);
+                prev = sig;
+                if (outside < changeThreshold()) return;
+                ref = null;
+                changeAt = now;
+                lastActivity = now;
+                hideLabels();
+                return;
+            }
+            boolean stable = diff(sig, prev, null, 0) < STABLE_T;
+            boolean forced = now - changeAt > FORCE_AFTER_MS;
+            prev = sig;
+            if (!stable && !forced) return;
+            if (overlayShown) { hideLabels(); return; }
         }
 
-        boolean stable = diff(sig, prev, null, 0) < STABLE_T;
-        boolean forced = now - changeAt > FORCE_AFTER_MS;
-        prev = sig;
-        if (!stable && !forced) return;
-        if (!clean && overlayShown) {   // la capa saldría en la captura: quitarla y esperar un cuadro
-            hideLabels();
-            return;
-        }
-
-        // ---- OCR
-        // Ampliar la imagen: la letra de los globos suele ser pequeña y el OCR lee mejor a más resolución.
-        float up = bmp.getWidth() < 1440 ? 1.5f : 1f;
+        // ---- OCR (un poco menos de ampliación mientras se desplaza, para responder más rápido)
+        float up = bmp.getWidth() < 1440 ? (scrolling ? 1.25f : 1.5f) : 1f;
         Bitmap ocrBmp = up > 1f
                 ? Bitmap.createScaledBitmap(bmp, Math.round(bmp.getWidth() * up), Math.round(bmp.getHeight() * up), true)
                 : bmp;
@@ -564,7 +653,6 @@ public class TranslatorService extends AccessibilityService {
             if (ocrBmp != bmp) ocrBmp.recycle();
         }
 
-        // Tomar línea por línea y reconstruir los globos (el OCR a veces corta o junta globos).
         List<Bubbles.Line> lines = new ArrayList<>();
         for (Text.TextBlock block : result.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
@@ -574,20 +662,41 @@ public class TranslatorService extends AccessibilityService {
                         Math.round(r.right / up), Math.round(r.bottom / up), line.getText()));
             }
         }
+
+        // Brillo de la captura, para encontrar el globo blanco alrededor de cada texto.
+        final int bw = bmp.getWidth(), bh = bmp.getHeight();
+        if (pixBuf == null || pixBuf.length != bw * bh) pixBuf = new int[bw * bh];
+        final int[] pixels = pixBuf;
+        bmp.getPixels(pixels, 0, bw, 0, 0, bw, bh);
+        Motion.Lum lum = (x, y) -> {
+            int c = pixels[y * bw + x];
+            return (((c >> 16) & 0xFF) * 3 + ((c >> 8) & 0xFF) * 6 + (c & 0xFF)) / 10;
+        };
+
         Rect bub = bubbleRect;
+        int edge = Math.max(4, bh / 100);
         List<Rect> rects = new ArrayList<>();
         List<String> texts = new ArrayList<>();
-        List<Float> heights = new ArrayList<>();
         for (Bubbles.Bubble b : Bubbles.group(lines)) {
             if (b.soundEffect) continue;            // no traducir "BOOM", "CRASH", etc.
+            // Globo a medio entrar por arriba/abajo: esperar a que se vea completo.
+            if (b.top <= edge || b.bottom >= bh - edge) continue;
             String t = cleanText(b.text);
             if (!isTranslatable(t)) continue;
-            Rect screen = new Rect(b.left, b.top, b.right, b.bottom);
-            screen.offset(offX, offY);
-            if (!clean && Rect.intersects(screen, bub)) continue; // no traducir nuestra burbuja
-            rects.add(screen);
+
+            int[] box = {b.left, b.top, b.right, b.bottom};
+            int maxGX = Math.round(Math.max(b.lineHeight * 3f, (b.right - b.left) * 0.45f));
+            int maxGY = Math.round(b.lineHeight * 2.5f);
+            Rect r;
+            if (Motion.expandBalloon(lum, bw, bh, box, maxGX, maxGY)) {
+                r = new Rect(box[0], box[1], box[2], box[3]);      // cubrir el interior del globo
+            } else {
+                r = padded(new Rect(b.left, b.top, b.right, b.bottom), b.lineHeight);
+            }
+            r.offset(offX, offY);
+            if (!clean && Rect.intersects(r, bub)) continue;   // no traducir nuestra burbuja
+            rects.add(r);
             texts.add(t);
-            heights.add(b.lineHeight);
             if (rects.size() >= MAX_BLOCKS) break;
         }
         if (gen != generation) return;
@@ -596,7 +705,6 @@ public class TranslatorService extends AccessibilityService {
         List<String> translated = translator.translateAll(texts, pool);
         List<Rect> outRects = new ArrayList<>();
         List<String> outTexts = new ArrayList<>();
-        List<Float> outHeights = new ArrayList<>();
         int errors = 0;
         for (int i = 0; i < texts.size(); i++) {
             String tr = translated.get(i);
@@ -604,7 +712,6 @@ public class TranslatorService extends AccessibilityService {
             if (!tr.trim().isEmpty() && !tr.trim().equalsIgnoreCase(texts.get(i))) {
                 outRects.add(rects.get(i));
                 outTexts.add(tr.trim());
-                outHeights.add(heights.get(i));
             }
         }
         if (gen != generation) return;
@@ -614,9 +721,8 @@ public class TranslatorService extends AccessibilityService {
 
         // ---- marcar las celdas cubiertas y mostrar
         boolean[] mask = new boolean[sig.length];
-        float sx = (float) GRID_W / bmp.getWidth(), sy = (float) gridH / bmp.getHeight();
-        List<Rect> maskRects = new ArrayList<>();
-        for (int i = 0; i < outRects.size(); i++) maskRects.add(labelRect(outRects.get(i), outHeights.get(i)));
+        float sx = (float) GRID_W / bw, sy = (float) gridH / bh;
+        List<Rect> maskRects = new ArrayList<>(outRects);
         if (!clean) maskRects.add(bub);
         for (Rect r : maskRects) {
             int x0 = Math.max(0, (int) ((r.left - offX) * sx));
@@ -628,12 +734,12 @@ public class TranslatorService extends AccessibilityService {
         textMask = mask;
         ref = sig;
         overlayShown = !outRects.isEmpty();
-        main.post(() -> { if (gen == generation) showLabels(outRects, outTexts, outHeights); });
+        main.post(() -> { if (gen == generation) showLabels(outRects, outTexts, frameScroll); });
     }
 
     private void hideLabels() {
         overlayShown = false;
-        main.post(() -> { if (overlay != null) overlay.removeAllViews(); });
+        main.post(() -> { if (content != null) content.removeAllViews(); });
     }
 
     /** Une líneas cortadas y pasa el TEXTO EN MAYÚSCULAS (típico del manga) a oración normal. */
@@ -705,6 +811,9 @@ public class TranslatorService extends AccessibilityService {
         lp.gravity = Gravity.TOP | Gravity.START;
         lp.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        content = new FrameLayout(this);
+        overlay.addView(content, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         wm.addView(overlay, lp);
         overlay.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) ->
                 v.getLocationOnScreen(overlayLoc));
@@ -720,11 +829,12 @@ public class TranslatorService extends AccessibilityService {
         if (overlay != null) {
             try { wm.removeView(overlay); } catch (Exception ignored) {}
             overlay = null;
+            content = null;
         }
     }
 
-    /** Zona que cubre la etiqueta: el texto original más un margen proporcional al tamaño de letra. */
-    private Rect labelRect(Rect r, float lineH) {
+    /** Zona que cubre la etiqueta cuando no hay globo blanco: el texto más un margen. */
+    private Rect padded(Rect r, float lineH) {
         int padX = Math.round(Math.max(dp(4), lineH * 0.55f));
         int padY = Math.round(Math.max(dp(3), lineH * 0.40f));
         Rect out = new Rect(r.left - padX, r.top - padY, r.right + padX, r.bottom + padY);
@@ -733,15 +843,17 @@ public class TranslatorService extends AccessibilityService {
         return out;
     }
 
-    private void showLabels(List<Rect> rects, List<String> texts, List<Float> heights) {
-        if (overlay == null || !live) return;
+    private void showLabels(List<Rect> rects, List<String> texts, float captureScroll) {
+        if (overlay == null || content == null || !live) return;
         overlay.getLocationOnScreen(overlayLoc);
-        overlay.removeAllViews();
+        content.removeAllViews();
+        labelsScroll = captureScroll;
+        applyScroll();
         int alpha = Math.round(Prefs.opacity(this) * 2.55f);
         Typeface face = Typeface.create("sans-serif-condensed", Typeface.BOLD);
 
         for (int i = 0; i < rects.size(); i++) {
-            Rect box = labelRect(rects.get(i), heights.get(i));
+            Rect box = rects.get(i);
             String text = texts.get(i);
 
             TextView tv = new TextView(this);
@@ -751,32 +863,32 @@ public class TranslatorService extends AccessibilityService {
             tv.setIncludeFontPadding(false);
             tv.setBreakStrategy(android.graphics.text.LineBreaker.BREAK_STRATEGY_BALANCED);
             tv.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
-            int inner = dp(2);
+            int inner = dp(3);
             tv.setPadding(inner, inner, inner, inner);
 
-            // Elegir el tamaño de letra más grande que quepa SIN partir palabras.
+            // Tamaño de letra más grande que quepa SIN partir palabras; si no cabe, la caja crece.
             float[] fit = fitText(text, tv.getPaint(), box.width() - inner * 2, box.height() - inner * 2);
             tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, fit[0]);
-            int w = Math.round(fit[1]) + inner * 2;
-            int left = box.centerX() - w / 2;
+            int w = Math.max(box.width(), Math.round(fit[1]) + inner * 2);
+            int h = Math.max(box.height(), Math.round(fit[2]) + inner * 2);
             tv.setText(text);
 
             GradientDrawable bg = new GradientDrawable();
             bg.setColor(Color.argb(alpha, 255, 255, 255));
-            bg.setCornerRadius(dp(6));
+            bg.setCornerRadius(Math.min(dp(14), Math.min(w, h) / 3f));
             tv.setBackground(bg);
 
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, box.height());
-            lp.leftMargin = left - overlayLoc[0];
-            lp.topMargin = box.top - overlayLoc[1];
-            overlay.addView(tv, lp);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, h);
+            lp.leftMargin = box.centerX() - w / 2 - overlayLoc[0];
+            lp.topMargin = box.centerY() - h / 2 - overlayLoc[1];
+            content.addView(tv, lp);
         }
     }
 
     /**
      * Busca el tamaño de letra más grande con el que el texto cabe en la caja sin cortar
      * ninguna palabra. Si no cabe, prueba ensanchando la caja un poco.
-     * @return {tamaño en px, ancho usado en px}
+     * @return {tamaño en px, ancho usado en px, alto del texto en px}
      */
     private float[] fitText(String text, android.text.TextPaint basePaint, int width, int height) {
         android.text.TextPaint paint = new android.text.TextPaint(basePaint);
@@ -794,11 +906,16 @@ public class TranslatorService extends AccessibilityService {
                         .setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE)
                         .build();
                 if (layout.getHeight() <= height && !breaksWords(layout, text)) {
-                    return new float[]{sp * density, w};
+                    return new float[]{sp * density, w, layout.getHeight()};
                 }
             }
         }
-        return new float[]{6f * density, Math.round(width * 1.5f)};
+        // No cabe ni con letra mínima: usar 7sp y dejar que la caja crezca hacia abajo.
+        int w = Math.max(1, Math.round(width * 1.5f));
+        paint.setTextSize(7f * density);
+        android.text.StaticLayout layout = android.text.StaticLayout.Builder
+                .obtain(text, 0, text.length(), paint, w).setIncludePad(false).build();
+        return new float[]{7f * density, w, layout.getHeight()};
     }
 
     private static boolean breaksWords(android.text.StaticLayout layout, String text) {
