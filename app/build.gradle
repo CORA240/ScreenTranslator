@@ -3,15 +3,15 @@ plugins {
 }
 
 android {
-    namespace 'com.balor.screentranslator'
+    namespace 'com.screentranslator.app'
     compileSdk 34
 
     defaultConfig {
-        applicationId 'com.balor.screentranslator'
+        applicationId 'com.screentranslator.app'
         minSdk 30          // Android 11+: captura de pantalla desde el servicio de accesibilidad
         targetSdk 34
-        versionCode 6
-        versionName '2.4'
+        versionCode 7
+        versionName '2.5'
     }
 
     signingConfigs {

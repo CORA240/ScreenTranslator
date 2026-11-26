@@ -1,4 +1,4 @@
-package com.balor.screentranslator;
+package com.screentranslator.app;
 
 import org.json.JSONArray;
 

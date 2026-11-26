@@ -1,4 +1,4 @@
-package com.balor.screentranslator;
+package com.screentranslator.app;
 
 /**
  * Cálculos de imagen sin clases de Android (se pueden probar fuera del teléfono):

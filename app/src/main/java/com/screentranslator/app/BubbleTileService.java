@@ -1,4 +1,4 @@
-package com.balor.screentranslator;
+package com.screentranslator.app;
 
 import android.app.PendingIntent;
 import android.content.ComponentName;

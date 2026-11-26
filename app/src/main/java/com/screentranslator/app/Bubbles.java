@@ -1,4 +1,4 @@
-package com.balor.screentranslator;
+package com.screentranslator.app;
 
 import java.util.ArrayList;
 import java.util.Collections;

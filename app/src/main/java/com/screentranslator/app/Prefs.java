@@ -1,4 +1,4 @@
-package com.balor.screentranslator;
+package com.screentranslator.app;
 
 import android.content.Context;
 import android.content.SharedPreferences;
